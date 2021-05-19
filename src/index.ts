@@ -5,7 +5,7 @@ import {
     MatrixClient,
     PantalaimonClient,
     RichConsoleLogger,
-    SimpleFsStorageProvider
+    SimpleFsStorageProvider, SimpleRetryJoinStrategy,
 } from "matrix-bot-sdk";
 import * as path from "path";
 import config from "./config";
@@ -39,6 +39,7 @@ LogService.info("index", "Bot starting...");
     if (config.autoJoin) {
         AutojoinRoomsMixin.setupOnClient(client);
     }
+    client.setJoinStrategy(new SimpleRetryJoinStrategy());
 
     // Prepare the command handler
     const commands = new CommandHandler(client);
