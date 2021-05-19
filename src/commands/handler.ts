@@ -1,10 +1,8 @@
-import { LogService, MatrixClient, MessageEvent, RichReply, UserID } from "matrix-bot-sdk";
-import { runHelloCommand } from "./hello";
-import * as htmlEscape from "escape-html";
+import { LogService, MatrixClient, MessageEvent, RoomAlias, UserID } from "matrix-bot-sdk";
 
 // The prefix required to trigger the bot. The bot will also respond
 // to being pinged directly.
-export const COMMAND_PREFIX = "!bot";
+export const COMMAND_PREFIX = "!convert";
 
 // This is where all of our commands will be handled
 export default class CommandHandler {
@@ -55,29 +53,109 @@ export default class CommandHandler {
         const args = event.textBody.substring(prefixUsed.length).trim().split(' ');
 
         // Try and figure out what command the user ran, defaulting to help
+        let progressReactionId: string;
         try {
-            if (args[0] === "hello") {
-                return runHelloCommand(roomId, event, args, this.client);
+            if (!args[0]) {
+                const html = "This bot's sole purpose is to convert communities to spaces. Use <code>!convert +group:example.org</code> to convert.";
+                return this.client.replyHtmlNotice(roomId, ev, html);
             } else {
-                const help = "" +
-                    "!bot hello [user]     - Say hello to a user.\n" +
-                    "!bot help             - This menu\n";
+                progressReactionId = await this.client.unstableApis.addReactionToEvent(roomId, ev['event_id'], 'In Progress');
 
-                const text = `Help menu:\n${help}`;
-                const html = `<b>Help menu:</b><br /><pre><code>${htmlEscape(help)}</code></pre>`;
-                const reply = RichReply.createFor(roomId, ev, text, html); // Note that we're using the raw event, not the parsed one!
-                reply["msgtype"] = "m.notice"; // Bots should always use notices
-                return this.client.sendMessage(roomId, reply);
+                const groupId = args[0];
+
+                const botServer = (new UserID(await this.client.getUserId())).domain;
+                const alias = `#spaceconvert_${groupId.replace(/:/g, '_')}:${botServer}`;
+
+                try {
+                    await this.client.resolveRoom(alias);
+
+                    // noinspection ES6MissingAwait - we don't care if this fails
+                    this.client.redactEvent(roomId, progressReactionId);
+
+                    return this.client.replyText(roomId, ev, "It appears as though that community has already been converted to a Space. If this is incorrect, please contact the bot administrator.");
+                } catch (e) {
+                    // Assume not created
+                }
+
+                const joinedGroups = await this.client.unstableApis.getJoinedGroups();
+                if (!joinedGroups.includes(groupId)) {
+                    try {
+                        await this.client.unstableApis.joinGroup(groupId);
+                    } catch (e) {
+                        LogService.error("CommandHandler", e);
+
+                        try {
+                            await this.client.unstableApis.acceptGroupInvite(groupId);
+                        } catch (e) {
+                            LogService.error("CommandHandler", e);
+
+                            // noinspection ES6MissingAwait - we don't care if this fails
+                            this.client.redactEvent(roomId, progressReactionId);
+
+                            return this.client.replyNotice(roomId, ev, "There was an error joining your community. Please invite me to your community then try again.");
+                        }
+                    }
+                }
+
+                const members = await this.client.unstableApis.getGroupUsers(groupId);
+                const admins = members.filter(u => u.is_privileged).map(u => u.user_id);
+                if (!admins.includes(ev['sender'])) {
+                    // noinspection ES6MissingAwait - we don't care if this fails
+                    this.client.redactEvent(roomId, progressReactionId);
+                    return this.client.replyNotice(roomId, ev, "Sorry, you are not an admin of that community.");
+                }
+                const profile = await this.client.unstableApis.getGroupProfile(groupId);
+
+                const space = await this.client.createSpace({
+                    name: profile['name'] || `${ev['sender']}'s Space`,
+                    topic: profile['short_description'] || '',
+                    isPublic: profile['is_openly_joinable'],
+                });
+                await this.client.sendStateEvent(space.roomId, "m.room.avatar", "", {
+                    url: profile['avatar_url'],
+                });
+
+                const groupRooms = await this.client.unstableApis.getGroupRooms(groupId);
+
+                for (const room of groupRooms) {
+                    const server = (room['canonical_alias']
+                        ? (new RoomAlias(room['canonical_alias']))
+                        : (new UserID(ev['sender']))
+                    ).domain;
+                    await space.addChildRoom(room['room_id'], {
+                        via: [server],
+                    });
+                }
+
+                const powerLevels = await this.client.getRoomStateEvent(space.roomId, "m.room.power_levels", "");
+                for (const admin of admins) {
+                    powerLevels['users'][admin] = 100;
+                }
+                await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
+
+                await this.client.createRoomAlias(alias, space.roomId);
+
+                for (const admin of admins) {
+                    await this.client.inviteUser(admin, space.roomId);
+                }
+
+                powerLevels['users'][await this.client.getUserId()] = 0;
+                await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
+                await this.client.unstableApis.addReactionToEvent(roomId, ev['event_id'], '✅');
+                await this.client.redactEvent(roomId, progressReactionId);
+                return this.client.replyHtmlNotice(roomId, ev, "Your community is now a space! I've made you admin, but <b>have not</b> invited your community's members just in case you'd like to change some settings first. Inviting your community members is a task left to you: typically the Space is advertised within your community rooms so people can join at their own leisure.");
             }
         } catch (e) {
             // Log the error
             LogService.error("CommandHandler", e);
 
+            if (progressReactionId) {
+                // noinspection ES6MissingAwait - we don't care if this fails
+                this.client.redactEvent(roomId, progressReactionId);
+            }
+
             // Tell the user there was a problem
-            const message = "There was an error processing your command";
-            const reply = RichReply.createFor(roomId, ev, message, message); // We don't need to escape the HTML because we know it is safe
-            reply["msgtype"] = "m.notice";
-            return this.client.sendMessage(roomId, reply);
+            return this.client.replyNotice(roomId, ev, "There was an error processing your command");
         }
     }
 }
