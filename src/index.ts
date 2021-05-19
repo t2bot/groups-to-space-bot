@@ -25,7 +25,7 @@ LogService.info("index", "Bot starting...");
 (async function () {
     // Prepare the storage system for the bot
     const storage = new SimpleFsStorageProvider(path.join(config.dataPath, "bot.json"));
-    
+
     // Create the client
     let client: MatrixClient;
     if (config.pantalaimon.use) { // create a client with Pantalaimon if pantalaimon.use set to true.
@@ -34,16 +34,16 @@ LogService.info("index", "Bot starting...");
     } else { // else use Matrix client.
         client = new MatrixClient(config.homeserverUrl, config.accessToken, storage);
     }
-    
+
     // Setup the autojoin mixin (if enabled)
     if (config.autoJoin) {
         AutojoinRoomsMixin.setupOnClient(client);
     }
-    
+
     // Prepare the command handler
     const commands = new CommandHandler(client);
-    
-    
+
+
     await commands.start();
     LogService.info("index", "Starting sync...");
     await client.start(); // This blocks until the bot is killed
