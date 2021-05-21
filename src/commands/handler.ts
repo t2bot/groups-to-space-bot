@@ -1,4 +1,13 @@
-import { LogService, MatrixClient, MessageEvent, RoomAlias, UserID } from "matrix-bot-sdk";
+import {
+    GroupProfile,
+    LogService,
+    MatrixClient,
+    MentionPill,
+    MessageEvent,
+    RoomAlias,
+    Space,
+    UserID
+} from "matrix-bot-sdk";
 
 // The prefix required to trigger the bot. The bot will also respond
 // to being pinged directly.
@@ -58,6 +67,45 @@ export default class CommandHandler {
             if (!args[0]) {
                 const html = "This bot's sole purpose is to convert communities to spaces. Use <code>!convert +group:example.org</code> to convert.";
                 return this.client.replyHtmlNotice(roomId, ev, html);
+            } else if (args[0] === 'resync') {
+                progressReactionId = await this.client.unstableApis.addReactionToEvent(roomId, ev['event_id'], 'In Progress');
+
+                const groupId = args[1];
+
+                const botServer = (new UserID(await this.client.getUserId())).domain;
+                const alias = `#spaceconvert_${groupId.replace(/:/g, '_')}:${botServer}`;
+
+                let spaceId: string;
+                try {
+                    spaceId = await this.client.resolveRoom(alias);
+                } catch (e) {
+                    // Assume not created
+                    // noinspection ES6MissingAwait - we don't care if this fails
+                    this.client.redactEvent(roomId, progressReactionId);
+
+                    return this.client.replyText(roomId, ev, "That group has not been converted to a Space yet.");
+                }
+
+                const space = await this.client.getSpace(spaceId);
+                if (!(await this.client.userHasPowerLevelFor(await this.client.getUserId(), space.roomId, "m.space.child", true))) {
+                    // noinspection ES6MissingAwait - we don't care if this fails
+                    this.client.redactEvent(roomId, progressReactionId);
+
+                    const spacePill = await MentionPill.forRoom(space.roomId, this.client);
+                    return this.client.replyHtmlText(roomId, ev, `Please make me an Admin of ${spacePill.html} so I can resync it. I'll demote myself after I'm done.`);
+                }
+
+                const members = await this.client.unstableApis.getGroupUsers(groupId);
+                const admins = members.filter(u => u.is_privileged).map(u => u.user_id);
+                if (!admins.includes(ev['sender'])) {
+                    // noinspection ES6MissingAwait - we don't care if this fails
+                    this.client.redactEvent(roomId, progressReactionId);
+                    return this.client.replyNotice(roomId, ev, "Sorry, you are not an admin of that community.");
+                }
+
+                const profile = await this.client.unstableApis.getGroupProfile(groupId);
+
+                await this.copyGroupToRoom(roomId, ev, progressReactionId, groupId, space, profile, admins);
             } else {
                 progressReactionId = await this.client.unstableApis.addReactionToEvent(roomId, ev['event_id'], 'In Progress');
 
@@ -104,6 +152,7 @@ export default class CommandHandler {
                     this.client.redactEvent(roomId, progressReactionId);
                     return this.client.replyNotice(roomId, ev, "Sorry, you are not an admin of that community.");
                 }
+
                 const profile = await this.client.unstableApis.getGroupProfile(groupId);
 
                 const space = await this.client.createSpace({
@@ -111,39 +160,9 @@ export default class CommandHandler {
                     topic: profile['short_description'] || '',
                     isPublic: profile['is_openly_joinable'],
                 });
-                await this.client.sendStateEvent(space.roomId, "m.room.avatar", "", {
-                    url: profile['avatar_url'],
-                });
-
-                const groupRooms = await this.client.unstableApis.getGroupRooms(groupId);
-
-                for (const room of groupRooms) {
-                    const server = (room['canonical_alias']
-                        ? (new RoomAlias(room['canonical_alias']))
-                        : (new UserID(ev['sender']))
-                    ).domain;
-                    await space.addChildRoom(room['room_id'], {
-                        via: [server],
-                    });
-                }
-
-                const powerLevels = await this.client.getRoomStateEvent(space.roomId, "m.room.power_levels", "");
-                for (const admin of admins) {
-                    powerLevels['users'][admin] = 100;
-                }
-                await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
-
                 await this.client.createRoomAlias(alias, space.roomId);
 
-                for (const admin of admins) {
-                    await this.client.inviteUser(admin, space.roomId);
-                }
-
-                powerLevels['users'][await this.client.getUserId()] = 0;
-                await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
-                await this.client.unstableApis.addReactionToEvent(roomId, ev['event_id'], '✅');
-                await this.client.redactEvent(roomId, progressReactionId);
-                return this.client.replyHtmlNotice(roomId, ev, "Your community is now a space! I've made you admin, but <b>have not</b> invited your community's members just in case you'd like to change some settings first. Inviting your community members is a task left to you: typically the Space is advertised within your community rooms so people can join at their own leisure.");
+                await this.copyGroupToRoom(roomId, ev, progressReactionId, groupId, space, profile, admins);
             }
         } catch (e) {
             // Log the error
@@ -157,5 +176,41 @@ export default class CommandHandler {
             // Tell the user there was a problem
             return this.client.replyNotice(roomId, ev, "There was an error processing your command");
         }
+    }
+
+    private async copyGroupToRoom(commandRoomId: string, ev: any, progressReactionId: string, groupId: string, space: Space, profile: GroupProfile, admins: string[]) {
+        await this.client.sendStateEvent(space.roomId, "m.room.avatar", "", {
+            url: profile['avatar_url'],
+        });
+
+        const groupRooms = await this.client.unstableApis.getGroupRooms(groupId);
+
+        for (const room of groupRooms) {
+            const server = (room['canonical_alias']
+                    ? (new RoomAlias(room['canonical_alias']))
+                    : (new UserID(ev['sender']))
+            ).domain;
+            await space.addChildRoom(room['room_id'], {
+                via: [server],
+            });
+        }
+
+        const powerLevels = await this.client.getRoomStateEvent(space.roomId, "m.room.power_levels", "");
+        for (const admin of admins) {
+            powerLevels['users'][admin] = 100;
+        }
+        await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
+
+        const members = await this.client.getJoinedRoomMembers(space.roomId);
+        for (const admin of admins) {
+            if (members.includes(admin)) continue;
+            await this.client.inviteUser(admin, space.roomId);
+        }
+
+        powerLevels['users'][await this.client.getUserId()] = 0;
+        await this.client.sendStateEvent(space.roomId, "m.room.power_levels", "", powerLevels);
+        await this.client.unstableApis.addReactionToEvent(commandRoomId, ev['event_id'], '✅');
+        await this.client.redactEvent(commandRoomId, progressReactionId);
+        return this.client.replyHtmlNotice(commandRoomId, ev, "Your community is now a space! I've made you admin, but <b>have not</b> invited your community's members just in case you'd like to change some settings first. Inviting your community members is a task left to you: typically the Space is advertised within your community rooms so people can join at their own leisure.");
     }
 }
