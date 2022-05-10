@@ -2,6 +2,10 @@
 
 Converts groups (legacy, aka "communities") to Spaces on demand.
 
+## ⚠ Officially deprecated
+
+Now that Spaces have been around for a while and the groups API is no longer readily available on Synapse, this project is now officially deprecated. It may still work for you, but it is not supported.
+
 ## Usage
 
 1. DM [@spacebot:t2bot.io](https://matrix.to/#/@spacebot:t2bot.io)
